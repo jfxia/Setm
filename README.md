@@ -19,8 +19,8 @@ python .\setm.py
 
 ## 界面截屏
 
-![截屏](/assets/screeshot1.png)
+![截屏](/assets/screenshot1.png)
 
-![截屏](/assets/screeshot2.png)
+![截屏](/assets/screenshot2.png)
 
-![截屏](/assets/screeshot3.png)
+![截屏](/assets/screenshot3.png)
