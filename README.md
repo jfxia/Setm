@@ -5,9 +5,9 @@
 
 **-- Python 3.8及以上版本**
 
-**-- OpenAI Whisper** (https://github.com/openai/whisper，安装后在PATH环境变量中设定）)
+**-- OpenAI Whisper** (github.com/openai/whisper，安装后在PATH环境变量中设定）)
 
-**-- DeepSeek API Key** (订阅https://platform.deepseek.com，并将API Key写在配置文件config.ini中)
+**-- DeepSeek API Key** (订阅platform.deepseek.com，并将API Key写在配置文件config.ini中)
 
 **-- FFMpeg**（安装后在PATH环境变量中设定）
 
