@@ -269,7 +269,7 @@ class ProcessThread(QThread):
 class VideoSubtitleApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("视频字幕工具 (提取-翻译-合成)")
+        self.setWindowTitle("Setm视频字幕工具 (提取-翻译-合成)")
         self.setGeometry(100, 100, 900, 700)
         # 设置窗口图标
         self.setWindowIcon(QIcon('icons/app_icon.png'))
