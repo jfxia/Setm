@@ -161,12 +161,16 @@ class ProcessThread(QThread):
     
                 # 提取字幕
                 self.log_signal.emit("[INFO] 开始提取字幕")
+
+				# 强制子进程使用 UTF-8 环境
+                proc_env = os.environ.copy()
+                proc_env['PYTHONUTF8'] = '1'
                 cmd_whisper = [
                     "whisper", self.video_path, "--model", self.model_size, "--language", self.language,
                     "--output_format", "srt", "--output_dir", os.path.dirname(self.video_path)
                 ]
                 self.log_signal.emit(f"[DEBUG] {cmd_whisper}")
-                process = subprocess.Popen(cmd_whisper, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+                process = subprocess.Popen(cmd_whisper, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, encoding='utf-8',env=proc_env)
                 for line in process.stdout:
                     if not self.is_running:
                         process.terminate()
@@ -269,7 +273,7 @@ class ProcessThread(QThread):
 class VideoSubtitleApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Setm视频字幕工具 (提取-翻译-合成)")
+        self.setWindowTitle("视频字幕工具 (提取-翻译-合成)")
         self.setGeometry(100, 100, 900, 700)
         # 设置窗口图标
         self.setWindowIcon(QIcon('icons/app_icon.png'))
