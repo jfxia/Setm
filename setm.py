@@ -324,7 +324,7 @@ class VideoSubtitleApp(QMainWindow):
             hbox_model = QHBoxLayout()
             model_label = QLabel("Whisper模型:")
             self.model_combo = QComboBox()
-            self.model_combo.addItems(["tiny", "small", "medium", "large"])
+            self.model_combo.addItems(["small", "tiny", "medium", "large"])
             self.model_combo.setMinimumHeight(35) 
             hbox_model.addWidget(model_label)
             hbox_model.addWidget(self.model_combo)
