@@ -4,6 +4,7 @@ import subprocess
 import json
 import platform
 import re
+import logging
 import requests
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -74,69 +75,267 @@ def open_folder(path):
     else:
         subprocess.Popen(["xdg-open", folder])
 
-# DeepSeek翻译
-def translate_text_deepseek(text, api_key):
+
+import requests
+import json
+import re
+import time
+import logging
+
+# 定义自定义异常处理部分条数不足的情况
+class PartialTranslationError(Exception):
+    def __init__(self, message, translated_items, missing_indices):
+        super().__init__(message)
+        self.translated_items = translated_items
+        self.missing_indices = missing_indices
+
+#调用Deepseek进行翻译，批处理
+def translate_text_deepseek(text_list, api_key, batch_id=None):
+    """
+    Translates a list of texts using the DeepSeek API with enhanced error handling
+    and partial result recovery.
+    """
     url = "https://api.deepseek.com/v1/chat/completions"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}"
     }
+    
+    # 优化后的系统提示词 - 更严格的格式控制
+    system_prompt = """
+    You are an expert subtitle translator. You will receive a numbered list of texts.
+    Translate each numbered text into natural, fluent Simplified Chinese without any extra explanations.
+    
+    RULES:
+    1. Preserve EXACTLY the same number of items in the output as in the input
+    2. Output MUST be a JSON object with a single key: "translations"
+    3. "translations" must be an array of strings in the SAME ORDER as input
+    4. Do NOT merge or split any items
+    5. Each translation should be concise and match the original length
+    
+    Example Input:
+    1. Hello world
+    2. Good morning
+    
+    Example Output:
+    {"translations": ["你好世界", "早上好"]}
+    """
+    
+    # 添加批次ID到用户内容帮助模型跟踪上下文
+    batch_header = f"Batch ID: {batch_id}\n" if batch_id else ""
+    user_content_lines = [f"{i+1}. {text}" for i, text in enumerate(text_list)]
+    user_content = batch_header + "\n".join(user_content_lines)
+
     data = {
         "model": "deepseek-chat",
         "messages": [
-            {"role": "system", "content": "你是一个翻译助手，将输入的英文或日文翻译为简体中文。直接翻译即可，不要做任何解释。"},
-            {"role": "user", "content": text}
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content}
         ],
-        "temperature": 0.2
+        "temperature": 0.1,
+        "top_p": 0.85,
+        "max_tokens": 4096,  # 确保最大token设置
+        "response_format": {"type": "json_object"}
     }
-    response = requests.post(url, headers=headers, json=data, timeout=60)
-    response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"].strip()
+    
+    try:
+        # 增加超时和重试逻辑
+        response = requests.post(url, headers=headers, json=data, timeout=120)
+        response.raise_for_status()
+        
+        response_json = response.json()
+        response_text = response_json["choices"][0]["message"]["content"]
+        
+        # 处理可能的非JSON响应
+        if not response_text.strip().startswith("{"):
+            # 尝试提取可能的JSON部分
+            json_start = response_text.find("{")
+            json_end = response_text.rfind("}") + 1
+            if json_start != -1 and json_end != 0:
+                response_text = response_text[json_start:json_end]
+        
+        parsed_json = json.loads(response_text)
+        
+        # 增强的错误处理
+        if 'error' in parsed_json:
+            error_msg = parsed_json.get('error', {}).get('message', 'Unknown API error')
+            raise ValueError(f"API error: {error_msg}")
+            
+        if 'translations' not in parsed_json:
+            raise ValueError("Missing 'translations' key in response")
+            
+        translated_list = parsed_json['translations']
+        
+        # 检查返回条数是否匹配
+        if len(translated_list) != len(text_list):
+            # 部分成功时返回已翻译内容
+            translated_items = []
+            missing_indices = []
+            
+            for i in range(len(text_list)):
+                if i < len(translated_list):
+                    translated_items.append((i, translated_list[i]))
+                else:
+                    missing_indices.append(i)
+            
+            raise PartialTranslationError(
+                f"Partial translation: Got {len(translated_list)} of {len(text_list)}",
+                translated_items,
+                missing_indices
+            )
+        
+        return [item for item in translated_list]
+        
+    except (json.JSONDecodeError, KeyError) as e:
+        logging.error(f"JSON parsing failed: {str(e)}")
+        logging.error(f"API response: {response_text[:500]}")
+        raise ValueError("Failed to parse API response as JSON") from e
+        
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Network error: {str(e)}")
+        raise ValueError(f"Network error: {e}") from e
+        
+    except Exception as e:
+        logging.error(f"Unexpected error: {str(e)}")
+        raise
 
-
-# 翻译SRT
-def translate_srt_file(input_srt, output_srt, api_key, log_signal=None):
+def translate_srt_file(input_srt, output_srt, api_key, log_signal):
+    """
+    Enhanced SRT translation with dynamic batching and automatic retry
+    """
     with open(input_srt, "r", encoding="utf-8") as f:
-        lines = f.readlines()
+        content = f.read()
 
-    result_lines = []
-    buffer = []
-    for line in lines:
-        if re.match(r"^\d+$", line.strip()):
-            if buffer:
-                result_lines.extend(buffer)
-                buffer = []
-            result_lines.append(line)
-        elif "-->" in line:
-            result_lines.append(line)
-        elif line.strip() == "":
-            if buffer:
-                original_text = " ".join([l.strip() for l in buffer])
-                if log_signal:
-                    print(f"[DEBUG] log_signal type: {type(log_signal)}")  
-                    log_signal.emit(f"[INFO] 翻译: {original_text}")
-                translated = translate_text_deepseek(original_text, api_key)
-                translated_lines = translated.split("\n")
-                for t in translated_lines:
-                    result_lines.append(t.strip() + "\n")
-                buffer = []
-            result_lines.append(line)
-        else:
-            buffer.append(line)
+    srt_pattern = re.compile(r'(\d+)\n(\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3})\n([\s\S]*?)(?=\n\n|\Z)', re.MULTILINE)
+    srt_blocks = srt_pattern.findall(content)
+    original_texts = [block[2].replace('\n', ' ').strip() for block in srt_blocks]
+    translated_texts = [""] * len(original_texts)  # 预填充空结果
+    
+    # 动态批次大小参数
+    MAX_RETRIES = 3
+    BASE_BATCH_SIZE = 15
+    MIN_BATCH_SIZE = 3
+    
+    current_batch_size = BASE_BATCH_SIZE
+    batch_num = 0
+    
+    i = 0
+    while i < len(original_texts):
+        batch_size = min(current_batch_size, len(original_texts) - i)
+        batch_originals = original_texts[i:i+batch_size]
+        batch_num += 1
+        
+        retry_count = 0
+        success = False
+        
+        while not success and retry_count < MAX_RETRIES:
+            try:
+                log_signal.emit(f"[INFO] Translating batch {batch_num} ({i+1}-{i+len(batch_originals)}), size={len(batch_originals)}")
+                
+                # 添加批次ID帮助跟踪
+                batch_translated = translate_text_deepseek(
+                    batch_originals, 
+                    api_key,
+                    batch_id=f"{i+1}-{i+len(batch_originals)}"
+                )
+                
+                # 成功获取完整批次
+                for j in range(len(batch_originals)):
+                    translated_texts[i+j] = batch_translated[j]
+                
+                log_signal.emit(f"[SUCCESS] Batch {batch_num} completed")
+                success = True
+                
+                # 成功时稍微增加批次大小（上限为20）
+                current_batch_size = min(20, current_batch_size + 1)
+                
+            except PartialTranslationError as e:
+                # 处理部分成功的情况
+                log_signal.emit(f"[WARN] Partial translation: {len(e.translated_items)}/{len(batch_originals)} succeeded")
+                
+                # 填充已翻译的部分
+                for idx, text in e.translated_items:
+                    translated_texts[i+idx] = text
+                
+                # 创建仅包含缺失项目的新批次
+                missing_items = [batch_originals[idx] for idx in e.missing_indices]
+                
+                if missing_items:
+                    log_signal.emit(f"[INFO] Retrying {len(missing_items)} missing items")
+                    
+                    try:
+                        # 重试缺失的项目
+                        retry_translated = translate_text_deepseek(
+                            missing_items, 
+                            api_key,
+                            batch_id=f"RETRY-{i+1}-{i+len(batch_originals)}"
+                        )
+                        
+                        # 填充缺失的翻译
+                        for k, idx in enumerate(e.missing_indices):
+                            translated_texts[i+idx] = retry_translated[k]
+                        
+                        success = True
+                        log_signal.emit(f"[SUCCESS] Missing items translated")
+                    
+                    except Exception as retry_e:
+                        log_signal.emit(f"[ERROR] Retry failed: {str(retry_e)}")
+                        # 重试失败时回退到单行翻译
+                        for idx in e.missing_indices:
+                            try:
+                                single_result = translate_text_deepseek(
+                                    [batch_originals[idx]], 
+                                    api_key
+                                )
+                                translated_texts[i+idx] = single_result[0]
+                                log_signal.emit(f"[INFO] Translated line {i+idx+1} individually")
+                            except Exception:
+                                log_signal.emit(f"[WARN] Using original for line {i+idx+1}")
+                                translated_texts[i+idx] = batch_originals[idx]  # 使用原文
+                        success = True
+                
+            except Exception as e:
+                retry_count += 1
+                wait_time = 2 ** retry_count  # 指数退避
+                
+                if retry_count < MAX_RETRIES:
+                    log_signal.emit(f"[WARN] Batch {batch_num} failed (attempt {retry_count}/{MAX_RETRIES}): {str(e)}")
+                    log_signal.emit(f"[INFO] Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                    
+                    # 减少批次大小防止反复失败
+                    current_batch_size = max(MIN_BATCH_SIZE, current_batch_size - 2)
+                else:
+                    log_signal.emit(f"[ERROR] Batch {batch_num} failed after {MAX_RETRIES} attempts")
+                    
+                    # 回退到逐行翻译
+                    for j in range(len(batch_originals)):
+                        try:
+                            single_result = translate_text_deepseek(
+                                [batch_originals[j]], 
+                                api_key
+                            )
+                            translated_texts[i+j] = single_result[0]
+                            log_signal.emit(f"[INFO] Translated line {i+j+1} individually")
+                        except Exception:
+                            log_signal.emit(f"[WARN] Using original for line {i+j+1}")
+                            translated_texts[i+j] = batch_originals[j]  # 使用原文
+                    success = True
+        
+        # 移动到下一批次
+        i += len(batch_originals)
 
-    if buffer:
-        original_text = " ".join([l.strip() for l in buffer])
-        if log_signal:
-            print(f"[DEBUG] log_signal type: {type(log_signal)}")  
-            log_signal.emit(f"[INFO] 翻译: {original_text}")
-        translated = translate_text_deepseek(original_text, api_key)
-        translated_lines = translated.split("\n")
-        for t in translated_lines:
-            result_lines.append(t.strip() + "\n")
-
+    # 写入翻译后的SRT文件
     with open(output_srt, "w", encoding="utf-8") as f:
-        f.writelines(result_lines)
-
+        for idx, block in enumerate(srt_blocks):
+            if idx < len(translated_texts):
+                f.write(f"{block[0]}\n")
+                f.write(f"{block[1]}\n")
+                f.write(f"{translated_texts[idx]}\n\n")
+            else:
+                f.write(f"{block[0]}\n")
+                f.write(f"{block[1]}\n")
+                f.write(f"{block[2]}\n\n")  # 使用原始文本作为后备
 # 一键线程
 class ProcessThread(QThread):
     progress_signal = pyqtSignal(int)
@@ -159,27 +358,30 @@ class ProcessThread(QThread):
                 translated_srt = f"{base_path}_zh.srt"
                 output_video = f"{base_path}_C.mp4"
     
-                # 提取字幕
-                self.log_signal.emit("[INFO] 开始提取字幕")
-
-				# 强制子进程使用 UTF-8 环境
-                proc_env = os.environ.copy()
-                proc_env['PYTHONUTF8'] = '1'
-                cmd_whisper = [
-                    "whisper", self.video_path, "--model", self.model_size, "--language", self.language,
-                    "--output_format", "srt", "--output_dir", os.path.dirname(self.video_path)
-                ]
-                self.log_signal.emit(f"[DEBUG] {cmd_whisper}")
-                process = subprocess.Popen(cmd_whisper, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, encoding='utf-8',env=proc_env)
-                for line in process.stdout:
-                    if not self.is_running:
-                        process.terminate()
-                        self.log_signal.emit("[INFO] 用户中止")
-                        return
-                    self.log_signal.emit(line.strip())
-                process.wait()
-                if process.returncode != 0:
-                    raise RuntimeError("字幕提取失败")
+                # 检查是否存在同名SRT文件 ---
+                if os.path.exists(srt_path):
+                    self.log_signal.emit(f"[INFO] 发现已存在的字幕文件: {os.path.basename(srt_path)}")
+                    self.log_signal.emit("[INFO] 跳过 Whisper 字幕提取步骤。")
+                else:
+                    self.log_signal.emit("[INFO] 未发现同名字幕文件，开始使用 Whisper 提取字幕。")
+                    # 强制子进程使用 UTF-8 环境
+                    proc_env = os.environ.copy()
+                    proc_env['PYTHONUTF8'] = '1'
+                    cmd_whisper = [
+                        "whisper", self.video_path, "--model", self.model_size, "--language", self.language,
+                        "--output_format", "srt", "--output_dir", os.path.dirname(self.video_path)
+                    ]
+                    self.log_signal.emit(f"[DEBUG] {cmd_whisper}")
+                    process = subprocess.Popen(cmd_whisper, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, encoding='utf-8',env=proc_env)
+                    for line in process.stdout:
+                        if not self.is_running:
+                            process.terminate()
+                            self.log_signal.emit("[INFO] 用户中止")
+                            return
+                        self.log_signal.emit(line.strip())
+                    process.wait()
+                    if process.returncode != 0:
+                        raise RuntimeError("字幕提取失败")
     
                 # 翻译
                 self.log_signal.emit("[INFO] 开始翻译字幕")
@@ -208,13 +410,12 @@ class ProcessThread(QThread):
                         "-vf", filter_string,
                         "-c:v", "libx264",
                         "-preset", "medium",
-                        "-b:v", original_bitrate,  # <-- 使用检测到的原始码率
+                        "-b:v", original_bitrate,
                         "-c:a", "copy",
                         "-y",
                         output_video
                     ]
                 else:
-                    # 如果因任何原因无法获取码率，则退回到安全的CRF方案
                     self.log_signal.emit("[WARN] 未能检测到原始码率，将使用CRF=26作为备用方案进行编码。")
                     cmd_ffmpeg = [
                         "ffmpeg",
@@ -222,7 +423,7 @@ class ProcessThread(QThread):
                         "-vf", filter_string,
                         "-c:v", "libx264",
                         "-preset", "medium",
-                        "-crf", "26",              # <-- 使用CRF作为备用方案
+                        "-crf", "26",
                         "-c:a", "copy",
                         "-y",
                         output_video
@@ -267,7 +468,7 @@ class ProcessThread(QThread):
     def stop(self):
         self.is_running = False
         self.log_signal.emit("[INFO] 停止中...")
-        print("[DEBUG] Stopping thread...") 
+        print("[DEBUG] Stopping thread...")
 
 # 主窗口
 class VideoSubtitleApp(QMainWindow):
@@ -324,7 +525,7 @@ class VideoSubtitleApp(QMainWindow):
             hbox_model = QHBoxLayout()
             model_label = QLabel("Whisper模型:")
             self.model_combo = QComboBox()
-            self.model_combo.addItems(["small", "tiny", "medium", "large"])
+            self.model_combo.addItems(["small", "tiny","medium", "large"])
             self.model_combo.setMinimumHeight(35) 
             hbox_model.addWidget(model_label)
             hbox_model.addWidget(self.model_combo)
